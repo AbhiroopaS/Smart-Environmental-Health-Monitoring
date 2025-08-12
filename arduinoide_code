@@ -1,0 +1,252 @@
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <DHT.h>
+#include <ESP8266WiFi.h>
+#include "ThingSpeak.h"
+
+// Define the pins for DHT11
+#define DHTPIN D4    // DHT11 data pin connected to D4 of NodeMCU
+#define DHTTYPE DHT11
+
+// Initialize DHT sensor
+DHT dht(DHTPIN, DHTTYPE);
+
+// Multiplexer select pins
+#define S0 D5
+#define S1 D6
+#define S2 D7
+
+// Initialize LCD with the I2C address (0x27) and size (16x2)
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+// WiFi and ThingSpeak details
+const char* ssid = "Abhiroopa";        // Enter your WiFi name
+const char* password = "112233445566"; // Enter your WiFi password
+const char* api_key = "F888ZJV8N94IEYDL"; // ThingSpeak API key
+const char* server = "api.thingspeak.com"; // ThingSpeak server
+
+WiFiClient client;
+unsigned long channelID = 2703975;  // Your ThingSpeak channel ID
+
+// Multiplexer common output pin
+int muxOutPin = A0;
+
+// RGB LED pins
+#define RED_PIN D0
+#define GREEN_PIN D3
+#define BLUE_PIN D2
+
+void setup() {
+  Serial.begin(115200);
+
+  // Initialize DHT sensor
+  dht.begin();
+
+  // Initialize LCD
+  lcd.begin();
+  lcd.backlight();
+  
+  // Setup multiplexer control pins
+  pinMode(S0, OUTPUT);
+  pinMode(S1, OUTPUT);
+  pinMode(S2, OUTPUT);
+
+  // Setup RGB LED pins
+  pinMode(RED_PIN, OUTPUT);
+  pinMode(GREEN_PIN, OUTPUT);
+  pinMode(BLUE_PIN, OUTPUT);
+
+  // Display initial message
+  lcd.setCursor(0, 0);
+  lcd.print("Air Quality");
+  lcd.setCursor(0, 1);
+  lcd.print("Monitoring");
+  delay(2000);
+  lcd.clear();
+
+  // Connect to WiFi
+  connectToWiFi();
+
+  // Initialize ThingSpeak
+  ThingSpeak.begin(client);
+}
+
+void loop() {
+  // Read temperature and humidity
+  float temperature = dht.readTemperature();
+  float humidity = dht.readHumidity();
+
+  // Check if any readings failed
+  if (isnan(temperature) || isnan(humidity)) {
+    Serial.println("Failed to read from DHT sensor!");
+    return;
+  }
+
+  // Read sensor values through multiplexer
+  int mq135Value = readMux(0); // MQ135 connected to C0
+  int mq7Value = readMux(1);  // MQ7 connected to C1
+  int pm25Value = readMux(2); // PM2.5 connected to C2
+
+  // Calculate AQI values for each sensor
+  int aqiMQ135 = calculateAQI(mq135Value);
+  int aqiMQ7 = calculateAQI(mq7Value);
+  int aqiPM25 = calculateAQI(pm25Value);
+
+  // Calculate overall AQI (e.g., using the highest AQI from the sensors)
+  int overallAQI = max(aqiMQ135, max(aqiMQ7, aqiPM25));
+
+  // Print values to Serial Monitor
+  Serial.print("Temperature: "); Serial.print(temperature); Serial.print(" °C, ");
+  Serial.print("Humidity: "); Serial.print(humidity); Serial.print(" %, ");
+  Serial.print("MQ135: "); Serial.print(mq135Value); Serial.print(" (PPM), AQI: "); Serial.print(aqiMQ135); Serial.print(", ");
+  Serial.print("MQ7: "); Serial.print(mq7Value); Serial.print(" (PPM), AQI: "); Serial.print(aqiMQ7); Serial.print(", ");
+  Serial.print("PM2.5: "); Serial.print(pm25Value); Serial.print(" (ug/cu.m), AQI: "); Serial.println(aqiPM25);
+
+  // Display sensor data on LCD
+  displayLCD(temperature, humidity, mq135Value, aqiMQ135, mq7Value, aqiMQ7, pm25Value, aqiPM25, overallAQI);
+
+  // Send data to ThingSpeak
+  sendToThingSpeak(temperature, humidity, mq135Value, aqiMQ135, mq7Value, aqiMQ7, pm25Value, aqiPM25, overallAQI);
+
+  // Set RGB LED color based on overall AQI
+  setRGBLED(overallAQI);
+
+  // Wait before next reading
+  delay(5000);
+}
+
+int readMux(int channel) {
+  // Set multiplexer select lines
+  digitalWrite(S0, channel & 0x01);
+  digitalWrite(S1, (channel >> 1) & 0x01);
+  digitalWrite(S2, (channel >> 2) & 0x01);
+  delay(10); // Allow for signal stabilization
+  return analogRead(muxOutPin);
+}
+
+int calculateAQI(int sensorValue) {
+  // Simple linear conversion from sensor value to AQI (this can be improved with a more detailed formula)
+  int aqi = map(sensorValue, 0, 1023, 0, 500); // Adjust based on your sensor's characteristics
+  return aqi;
+}
+
+void displayLCD(float temperature, float humidity, int mq135, int aqiMQ135, int mq7, int aqiMQ7, int pm25, int aqiPM25, int overallAQI) {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Temp: "); lcd.print(temperature); lcd.print((char)223); lcd.print("C");
+  lcd.setCursor(0, 1);
+  lcd.print("Hum: "); lcd.print(humidity); lcd.print("%");
+  delay(4000);
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("MQ135: "); lcd.print(mq135); lcd.print(" PPM"); lcd.setCursor(0, 1);
+  lcd.print("AQI: "); lcd.print(aqiMQ135);
+  delay(4000);
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("MQ7: "); lcd.print(mq7); lcd.print(" PPM"); lcd.setCursor(0, 1);
+  lcd.print("AQI: "); lcd.print(aqiMQ7);
+  delay(4000);
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("PM2.5:"); lcd.print(pm25); lcd.print("ug/cu.m"); lcd.setCursor(0, 1);
+  lcd.print("AQI: "); lcd.print(aqiPM25);
+  delay(4000);
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Overall AQI: "); lcd.print(overallAQI);
+  delay(4000);
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  
+  lcd.print("Air Quality: ");
+  lcd.setCursor(0, 1);
+  if (overallAQI < 100) {
+    lcd.print("Good");
+  } else if (overallAQI < 200) {
+    lcd.print("Moderate");
+  } else if (overallAQI < 300) {
+    lcd.print("Unhealthy");
+  } else {
+    lcd.print("Hazardous");
+  }
+  delay(4000);
+}
+
+void connectToWiFi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+
+  Serial.print("Connecting to WiFi");
+  lcd.setCursor(0, 0);
+  lcd.print("Connecting...");
+  
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+    lcd.setCursor(0, 1);
+    lcd.print(".");
+  }
+  Serial.println("\nWiFi connected!");
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("WiFi Connected");
+  delay(2000);
+  lcd.clear();
+}
+
+void sendToThingSpeak(float temperature, float humidity, int mq135, int aqiMQ135, int mq7, int aqiMQ7, int pm25, int aqiPM25, int overallAQI) {
+  ThingSpeak.setField(1, temperature);  // Field 1: Temperature (°C)
+  ThingSpeak.setField(2, humidity);     // Field 2: Humidity (%)
+  ThingSpeak.setField(3, mq135);        // Field 3: MQ135 (PPM)
+  ThingSpeak.setField(4, pm25);         // Field 4: PM2.5 (µg/m³)
+  ThingSpeak.setField(5, mq7);          // Field 5: MQ7 (PPM)
+  ThingSpeak.setField(6, overallAQI);   // Field 6: Overall AQI
+  ThingSpeak.setField(7, getLEDColor(overallAQI)); // Field 7: LED Color
+
+  int responseCode = ThingSpeak.writeFields(channelID, api_key);
+  
+  if (responseCode == 200) {
+    Serial.println("Data sent to ThingSpeak successfully.");
+  } else {
+    Serial.print("Error sending data to ThingSpeak: ");
+    Serial.println(responseCode);
+  }
+}
+
+String getLEDColor(int aqi) {
+  if (aqi < 100) {
+    return "Green";
+  } else if (aqi < 200) {
+    return "Yellow";
+  } else if (aqi < 300) {
+    return "Red";
+  } else {
+    return "Purple";
+  }
+}
+
+void setRGBLED(int aqi) {
+  if (aqi < 100) {
+    analogWrite(RED_PIN, 0);
+    analogWrite(GREEN_PIN, 255);
+    analogWrite(BLUE_PIN, 0);
+  } else if (aqi < 200) {
+    analogWrite(RED_PIN, 255);
+    analogWrite(GREEN_PIN, 255);
+    analogWrite(BLUE_PIN, 0);
+  } else if (aqi < 300) {
+    analogWrite(RED_PIN, 255);
+    analogWrite(GREEN_PIN, 0);
+    analogWrite(BLUE_PIN, 0);
+  } else {
+    analogWrite(RED_PIN, 128);
+    analogWrite(GREEN_PIN, 0);
+    analogWrite(BLUE_PIN, 128);
+  }
+}
